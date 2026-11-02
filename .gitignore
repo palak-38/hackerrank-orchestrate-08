@@ -16,7 +16,7 @@ __pycache__/
 *.npy
 .venv/
 venv/
-code.zip
+*.egg-info/
 
 # Local A/B comparison runs of the app/ agent variants.
 ab_results/
