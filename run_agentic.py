@@ -11,12 +11,13 @@ from code.data_store import DataStore, connect
 from code.media_analysis import load_cached
 
 from app.services.agent_routing import route_message
-from app.services.two_stage_routing import route_message_two_stage
 
 
 async def main():
-    parser = argparse.ArgumentParser(description="Route one message with an agent variant.")
-    parser.add_argument("--two-stage", action="store_true", help="use the research+decision variant")
+    parser = argparse.ArgumentParser(
+        description="Route one message with an agent variant."
+    )
+
     args = parser.parse_args()
 
     store = DataStore(connect())
@@ -34,8 +35,7 @@ async def main():
     print("\nIncoming message:")
     print(message.model_dump_json(indent=2))
 
-    route = route_message_two_stage if args.two_stage else route_message
-    decision, trace = await route(
+    decision, trace = await route_message(
         message,
         store,
         builder,

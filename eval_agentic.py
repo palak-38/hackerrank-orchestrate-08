@@ -28,19 +28,24 @@ from openai import RateLimitError
 
 from app.services.agent_routing import route_message
 from app.services.trace import RoutingTrace
-from app.services.two_stage_routing import route_message_two_stage
 
 # Fixed set: 4 notify / 3 digest / 3 mute, spanning group, business and personal
 # chats, text, voice and image, single- and multi-evidence and no-evidence labels.
 # Scam samples are excluded: the safety gate decides them before any agent runs.
 DEFAULT_IDS = [
-    "sample_msg_001", "sample_msg_004", "sample_msg_046", "sample_msg_051",  # notify
-    "sample_msg_008", "sample_msg_041", "sample_msg_049",                    # digest
-    "sample_msg_013", "sample_msg_014", "sample_msg_045",                    # mute
+    "sample_msg_001",
+    "sample_msg_004",
+    "sample_msg_046",
+    "sample_msg_051",  # notify
+    "sample_msg_008",
+    "sample_msg_041",
+    "sample_msg_049",  # digest
+    "sample_msg_013",
+    "sample_msg_014",
+    "sample_msg_045",  # mute
 ]
 
 VARIANTS = {
-    "two_stage": route_message_two_stage,
     "single_agent": route_message,
 }
 
@@ -73,7 +78,9 @@ def tool_use_bucket(trace: RoutingTrace, gold_evidence: list[str]) -> str:
     return "useful_retrieval" if found else "wasted_retrieval"
 
 
-async def run_one(route, message, store, builder) -> tuple[dict | None, RoutingTrace | None, str | None]:
+async def run_one(
+    route, message, store, builder
+) -> tuple[dict | None, RoutingTrace | None, str | None]:
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         try:
             decision, trace = await route(message, store, builder)
@@ -83,7 +90,11 @@ async def run_one(route, message, store, builder) -> tuple[dict | None, RoutingT
                 return None, None, "RateLimitError: retries exhausted"
             await asyncio.sleep(RATE_LIMIT_WAIT_S)
         except Exception as exc:  # recorded as a failure for this variant
-            return None, getattr(exc, "routing_trace", None), f"{type(exc).__name__}: {exc}"[:300]
+            return (
+                None,
+                getattr(exc, "routing_trace", None),
+                f"{type(exc).__name__}: {exc}"[:300],
+            )
     return None, None, "unreachable"
 
 
@@ -94,7 +105,9 @@ def score(record: dict, gold: dict) -> dict:
         return {"action_ok": False, "type_ok": False, "evidence_ok": False}
     pred_evidence = _ids(pred["evidence_message_ids"])
     evidence_ok = (
-        not pred_evidence if not gold_evidence else bool(set(gold_evidence) & set(pred_evidence))
+        not pred_evidence
+        if not gold_evidence
+        else bool(set(gold_evidence) & set(pred_evidence))
     )
     return {
         "action_ok": pred["action"] == gold["action"],
@@ -114,7 +127,13 @@ def unsupported_ids(record: dict) -> list[str]:
 
 def summarise(records: list[dict]) -> str:
     rows = []
-    buckets = ["justified_skip", "bad_skip", "useful_retrieval", "wasted_retrieval", "n/a"]
+    buckets = [
+        "justified_skip",
+        "bad_skip",
+        "useful_retrieval",
+        "wasted_retrieval",
+        "n/a",
+    ]
     for variant in VARIANTS:
         rs = [r for r in records if r["variant"] == variant]
         n = len(rs)
@@ -127,28 +146,45 @@ def summarise(records: list[dict]) -> str:
         def avg(key: str) -> str:
             return f"{sum(r['trace'][key] for r in llm) / len(llm):.1f}" if llm else "-"
 
-        first_invalid = sum(1 for r in rs if r["trace"] and r["trace"]["validation_errors"])
-        bucket_counts = {b: sum(1 for r in rs if r.get("tool_bucket") == b) for b in buckets}
-        rows.append({
-            "variant": variant,
-            "Routing accuracy (action)": pct(sum(r["score"]["action_ok"] for r in rs), n),
-            "Type accuracy": pct(sum(r["score"]["type_ok"] for r in rs), n),
-            "Action + type": pct(sum(r["score"]["action_ok"] and r["score"]["type_ok"] for r in rs), n),
-            "Evidence accuracy": pct(sum(r["score"]["evidence_ok"] for r in rs), n),
-            "Failed (no decision)": pct(n - len(ok), n),
-            "Invalid JSON (any attempt)": pct(first_invalid, n),
-            "Avg model requests": avg("model_requests"),
-            "Tool-call rate": pct(sum(1 for r in llm if r["trace"]["tool_calls"]), len(llm)),
-            "Avg latency (s)": avg("latency_s"),
-            "Avg input tokens": avg("input_tokens"),
-            "Avg output tokens": avg("output_tokens"),
-            "Unsupported evidence IDs": str(sum(len(unsupported_ids(r)) for r in rs)),
-            **{f"Tool use: {b}": str(bucket_counts[b]) for b in buckets},
-        })
+        first_invalid = sum(
+            1 for r in rs if r["trace"] and r["trace"]["validation_errors"]
+        )
+        bucket_counts = {
+            b: sum(1 for r in rs if r.get("tool_bucket") == b) for b in buckets
+        }
+        rows.append(
+            {
+                "variant": variant,
+                "Routing accuracy (action)": pct(
+                    sum(r["score"]["action_ok"] for r in rs), n
+                ),
+                "Type accuracy": pct(sum(r["score"]["type_ok"] for r in rs), n),
+                "Action + type": pct(
+                    sum(r["score"]["action_ok"] and r["score"]["type_ok"] for r in rs),
+                    n,
+                ),
+                "Evidence accuracy": pct(sum(r["score"]["evidence_ok"] for r in rs), n),
+                "Failed (no decision)": pct(n - len(ok), n),
+                "Invalid JSON (any attempt)": pct(first_invalid, n),
+                "Avg model requests": avg("model_requests"),
+                "Tool-call rate": pct(
+                    sum(1 for r in llm if r["trace"]["tool_calls"]), len(llm)
+                ),
+                "Avg latency (s)": avg("latency_s"),
+                "Avg input tokens": avg("input_tokens"),
+                "Avg output tokens": avg("output_tokens"),
+                "Unsupported evidence IDs": str(
+                    sum(len(unsupported_ids(r)) for r in rs)
+                ),
+                **{f"Tool use: {b}": str(bucket_counts[b]) for b in buckets},
+            }
+        )
 
     metrics = [k for k in rows[0] if k != "variant"]
-    lines = ["| Metric | " + " | ".join(r["variant"] for r in rows) + " |",
-             "|---|" + "---|" * len(rows)]
+    lines = [
+        "| Metric | " + " | ".join(r["variant"] for r in rows) + " |",
+        "|---|" + "---|" * len(rows),
+    ]
     lines += [f"| {m} | " + " | ".join(r[m] for r in rows) + " |" for m in metrics]
 
     lines.append("\nPer message (action/type, tool bucket):\n")
@@ -158,7 +194,9 @@ def summarise(records: list[dict]) -> str:
         cells = []
         gold = None
         for variant in VARIANTS:
-            r = next(x for x in records if x["message_id"] == mid and x["variant"] == variant)
+            r = next(
+                x for x in records if x["message_id"] == mid and x["variant"] == variant
+            )
             gold = f"{r['gold']['action']}/{r['gold']['message_type']}"
             if r["decision"] is None:
                 cells.append(f"ERROR: {r['error'][:40]}")
@@ -171,7 +209,9 @@ def summarise(records: list[dict]) -> str:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--ids", help="comma-separated sample message IDs (default: fixed set of 10)")
+    parser.add_argument(
+        "--ids", help="comma-separated sample message IDs (default: fixed set of 10)"
+    )
     args = parser.parse_args()
     ids = args.ids.split(",") if args.ids else DEFAULT_IDS
 
@@ -191,15 +231,24 @@ async def main() -> None:
     with (out_dir / "records.jsonl").open("w", encoding="utf-8") as fh:
         for mid in ids:
             for variant, route in VARIANTS.items():
-                decision, trace, error = await run_one(route, messages[mid], store, builder)
+                decision, trace, error = await run_one(
+                    route, messages[mid], store, builder
+                )
                 record = {
                     "message_id": mid,
                     "variant": variant,
-                    "gold": {k: gold[mid][k] for k in ("action", "message_type", "evidence_message_ids")},
+                    "gold": {
+                        k: gold[mid][k]
+                        for k in ("action", "message_type", "evidence_message_ids")
+                    },
                     "decision": decision,
                     "trace": trace.to_dict() if trace else None,
                     "error": error,
-                    "tool_bucket": tool_use_bucket(trace, _ids(gold[mid]["evidence_message_ids"])) if trace else "error",
+                    "tool_bucket": tool_use_bucket(
+                        trace, _ids(gold[mid]["evidence_message_ids"])
+                    )
+                    if trace
+                    else "error",
                 }
                 record["score"] = score(record, gold[mid])
                 record["unsupported_evidence_ids"] = unsupported_ids(record)

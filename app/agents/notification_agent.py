@@ -3,7 +3,7 @@ from code.router import SYSTEM_PROMPT
 from agents import Agent
 
 from app.agents.context import NotificationContext
-from app.agents.model import JSON_CONTRACT, TOOL_SETTINGS, model
+from app.agents.model import AGENT_JSON_CONTRACT, TOOL_SETTINGS, model
 from app.agents.tools import (
     find_messages_from_sender,
     search_history,
@@ -32,7 +32,7 @@ When you are done, your final reply is the routing decision.
 
 notification_agent = Agent[NotificationContext](
     name="Notification Agent",
-    instructions=SYSTEM_PROMPT + TOOL_USE_INSTRUCTIONS + JSON_CONTRACT,
+    instructions=SYSTEM_PROMPT + TOOL_USE_INSTRUCTIONS + AGENT_JSON_CONTRACT,
     model=model,
     model_settings=TOOL_SETTINGS,
     tools=[
