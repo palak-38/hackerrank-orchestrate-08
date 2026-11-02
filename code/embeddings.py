@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import numpy as np
-
+import numpy as np  # type: ignore
 from config import EMBEDDING_MODEL
 
 _model = None
@@ -10,7 +9,7 @@ _model = None
 def get_model():
     global _model
     if _model is None:
-        from sentence_transformers import SentenceTransformer
+        from sentence_transformers import SentenceTransformer  # type: ignore
 
         _model = SentenceTransformer(EMBEDDING_MODEL)
     return _model
@@ -24,7 +23,7 @@ def embed(texts: list[str]) -> np.ndarray:
     return model.encode(
         texts,
         normalize_embeddings=True,
-        show_progress_bar=False,
+        show_progress_bar=True,
         convert_to_numpy=True,
     ).astype(np.float32)
 
@@ -38,12 +37,14 @@ class SimilarityIndex:
         self.vectors = vectors
 
     @classmethod
-    def build(cls, items: list[tuple[str, str]]) -> "SimilarityIndex":
+    def build(cls, items: list[tuple[str, str]]) -> SimilarityIndex:
         ids = [i for i, _ in items]
         vectors = embed([t for _, t in items])
         return cls(ids, vectors)
 
-    def search(self, query: str, allowed_ids: set[str] | None = None, top_k: int = 10) -> list[tuple[str, float]]:
+    def search(
+        self, query: str, allowed_ids: set[str] | None = None, top_k: int = 10
+    ) -> list[tuple[str, float]]:
         if not self.ids or not query.strip():
             return []
         qvec = embed([query])[0]

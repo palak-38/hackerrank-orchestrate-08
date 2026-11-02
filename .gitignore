@@ -17,3 +17,6 @@ __pycache__/
 .venv/
 venv/
 code.zip
+
+# Local A/B comparison runs of the app/ agent variants.
+ab_results/

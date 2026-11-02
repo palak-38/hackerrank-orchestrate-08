@@ -65,12 +65,16 @@ class MediaAnalysis(BaseModel):
         if self.description:
             parts.append(f"Media description: {self.description}")
         if self.transcript:
-            label = "Voice transcript" if self.media_type == "voice" else "Text in image"
+            label = (
+                "Voice transcript" if self.media_type == "voice" else "Text in image"
+            )
             parts.append(f"{label}: {self.transcript}")
         if self.detected_urls:
             parts.append(f"URLs in media: {', '.join(self.detected_urls)}")
         if self.detected_phone_numbers:
-            parts.append(f"Phone numbers in media: {', '.join(self.detected_phone_numbers)}")
+            parts.append(
+                f"Phone numbers in media: {', '.join(self.detected_phone_numbers)}"
+            )
         if self.mentions_payment:
             parts.append("Media references payment/money.")
         if self.analysis_error:
@@ -245,13 +249,17 @@ class MessageRoutingContext(BaseModel):
 class LLMRoutingDecision(BaseModel):
     """Structured output requested from the LLM."""
 
-    action: Action = Field(description="notify to interrupt now, digest to show later, mute to suppress")
+    action: Action = Field(
+        description="notify to interrupt now, digest to show later, mute to suppress"
+    )
     message_type: MessageType = Field(description="best-fit category for this message")
     reason: str = Field(
         description="One short sentence (max 25 words) explaining the decision in terms of this user's context.",
         max_length=300,
     )
-    confidence: float = Field(ge=0.0, le=1.0, description="How confident you are in this routing decision")
+    confidence: float = Field(
+        ge=0.0, le=1.0, description="How confident you are in this routing decision"
+    )
 
 
 class EvidencePlan(BaseModel):
@@ -268,8 +276,11 @@ class EvidencePlan(BaseModel):
     need_more_evidence: bool = Field(
         description="Should a different lookup be run before deciding?"
     )
-    evidence_tool: Literal["none", "search_history", "find_messages_from_sender"] = Field(
-        default="none", description="Which lookup to run when need_more_evidence is true."
+    evidence_tool: Literal["none", "search_history", "find_messages_from_sender"] = (
+        Field(
+            default="none",
+            description="Which lookup to run when need_more_evidence is true.",
+        )
     )
     search_query: str = Field(
         default="",
@@ -291,9 +302,11 @@ class AgentRoutingDecision(LLMRoutingDecision):
             "and a different lookup would plausibly find something better. Otherwise decide now."
         ),
     )
-    evidence_tool: Literal["none", "search_history", "find_messages_from_sender"] = Field(
-        default="none",
-        description="Which lookup to run when need_more_evidence is true.",
+    evidence_tool: Literal["none", "search_history", "find_messages_from_sender"] = (
+        Field(
+            default="none",
+            description="Which lookup to run when need_more_evidence is true.",
+        )
     )
     search_query: str = Field(
         default="",

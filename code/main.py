@@ -6,12 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import OUTPUT_CSV, ROUTING_CACHE, SQLITE_DB  # noqa: E402
-from context_builder import ContextBuilder  # noqa: E402
-from data_store import DataStore, build_db, connect  # noqa: E402
-from finalize import finalize  # noqa: E402
-from media_analysis import analyse_all, load_cached  # noqa: E402
-from pipeline import run  # noqa: E402
+from config import OUTPUT_CSV, ROUTING_CACHE, SQLITE_DB
+from context_builder import ContextBuilder
+from data_store import DataStore, build_db, connect
+from finalize import finalize
+from media_analysis import analyse_all, load_cached
+from pipeline import run
 
 
 def cmd_media(args: argparse.Namespace) -> None:
@@ -29,7 +29,9 @@ def cmd_route(args: argparse.Namespace) -> None:
     store = DataStore(build_db() if args.rebuild_db else connect())
     media = load_cached()
     if not media:
-        print("warning: no media analysis cache found; media messages will be routed on text alone.")
+        print(
+            "warning: no media analysis cache found; media messages will be routed on text alone."
+        )
         print("         run `python code/main.py media` first for best results.")
     builder = ContextBuilder(store, media)
 
@@ -39,7 +41,9 @@ def cmd_route(args: argparse.Namespace) -> None:
     def tools_factory(msg):
         return EvidenceTools(builder.retriever, store, msg)
 
-    decisions = run(store, builder, LLMRouter(), tools_factory, table=args.table, limit=args.limit)
+    decisions = run(
+        store, builder, LLMRouter(), tools_factory, table=args.table, limit=args.limit
+    )
     print(f"\n{len(decisions)} decisions cached in {ROUTING_CACHE}")
 
     if args.table == "messages":
@@ -50,12 +54,13 @@ def cmd_route(args: argparse.Namespace) -> None:
 def cmd_evaluate(args: argparse.Namespace) -> None:
     """Score the labelled samples, routing them first if nothing is cached."""
     from evaluation.score import main as score
-
     from pipeline import load_cache
 
     if not any(mid.startswith("sample_") for mid in load_cache()):
         print("no cached sample predictions; routing them first\n")
-        cmd_route(argparse.Namespace(table="sample_messages", limit=None, rebuild_db=True))
+        cmd_route(
+            argparse.Namespace(table="sample_messages", limit=None, rebuild_db=True)
+        )
         print()
     score()
 
@@ -63,7 +68,9 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
 def cmd_finalize(args: argparse.Namespace) -> None:
     store = DataStore(connect())
     total, missing = finalize(store)
-    print(f"wrote {OUTPUT_CSV} with {total} rows ({missing} backfilled with safe defaults)")
+    print(
+        f"wrote {OUTPUT_CSV} with {total} rows ({missing} backfilled with safe defaults)"
+    )
 
 
 def cmd_build(args: argparse.Namespace) -> None:
@@ -72,23 +79,31 @@ def cmd_build(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="main.py", description="WhatsApp message notification router")
+    parser = argparse.ArgumentParser(
+        prog="main.py", description="WhatsApp message notification router"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("build-db", help="load dataset CSVs into SQLite")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser("media", help="one-time Gemini pass over images and voice notes")
-    p.add_argument("--force", action="store_true", help="re-analyse everything, ignoring the cache")
+    p.add_argument(
+        "--force", action="store_true", help="re-analyse everything, ignoring the cache"
+    )
     p.set_defaults(func=cmd_media)
 
     p = sub.add_parser("route", help="route messages and write output.csv")
-    p.add_argument("--table", default="messages", choices=["messages", "sample_messages"])
+    p.add_argument(
+        "--table", default="messages", choices=["messages", "sample_messages"]
+    )
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--rebuild-db", action="store_true")
     p.set_defaults(func=cmd_route)
 
-    p = sub.add_parser("evaluate", help="score the labelled samples (routes them first if needed)")
+    p = sub.add_parser(
+        "evaluate", help="score the labelled samples (routes them first if needed)"
+    )
     p.set_defaults(func=cmd_evaluate)
 
     p = sub.add_parser("finalize", help="write output.csv from cached decisions")
