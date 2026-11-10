@@ -5,6 +5,7 @@ import argparse
 from notification_router.config import OUTPUT_CSV, ROUTING_CACHE, SQLITE_DB
 from notification_router.context_builder import ContextBuilder
 from notification_router.data_store import DataStore, build_db, connect
+from notification_router.deciders import DECIDERS, get_decider
 from notification_router.finalize import finalize
 from notification_router.media_analysis import analyse_all, load_cached
 from notification_router.pipeline import run
@@ -31,19 +32,11 @@ def cmd_route(args: argparse.Namespace) -> None:
         print("         run `notification-router media` first for best results.")
     builder = ContextBuilder(store, media)
 
-    from notification_router.agent_tools import EvidenceTools
-    from notification_router.router import LLMRouter
-
-    def tools_factory(msg):
-        return EvidenceTools(builder.retriever, store, msg)
-
-    decisions = run(
-        store, builder, LLMRouter(), tools_factory, table=args.table, limit=args.limit
-    )
-    print(f"\n{len(decisions)} decisions cached in {ROUTING_CACHE}")
+    decisions = run(store, builder, get_decider(args.decider), table=args.table, limit=args.limit)
+    print(f"\n{len(decisions)} {args.decider} decisions cached in {ROUTING_CACHE}")
 
     if args.table == "messages":
-        total, missing = finalize(store)
+        total, missing = finalize(store, args.decider)
         print(f"wrote {OUTPUT_CSV} with {total} rows ({missing} backfilled)")
 
 
@@ -52,18 +45,20 @@ def cmd_evaluate(args: argparse.Namespace) -> None:
     from notification_router.evaluation.score import main as score
     from notification_router.pipeline import load_cache
 
-    if not any(mid.startswith("sample_") for mid in load_cache()):
-        print("no cached sample predictions; routing them first\n")
+    if not any(mid.startswith("sample_") for mid in load_cache(args.decider)):
+        print(f"no cached {args.decider} sample predictions; routing them first\n")
         cmd_route(
-            argparse.Namespace(table="sample_messages", limit=None, rebuild_db=True)
+            argparse.Namespace(
+                table="sample_messages", limit=None, rebuild_db=True, decider=args.decider
+            )
         )
         print()
-    score()
+    score(args.decider)
 
 
 def cmd_finalize(args: argparse.Namespace) -> None:
     store = DataStore(connect())
-    total, missing = finalize(store)
+    total, missing = finalize(store, args.decider)
     print(
         f"wrote {OUTPUT_CSV} with {total} rows ({missing} backfilled with safe defaults)"
     )
@@ -80,6 +75,14 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def add_decider(p: argparse.ArgumentParser) -> None:
+        p.add_argument(
+            "--decider",
+            default="single",
+            choices=DECIDERS,
+            help="how the LLM reaches a decision: one structured call, or the SDK tool agent",
+        )
+
     p = sub.add_parser("build-db", help="load dataset CSVs into SQLite")
     p.set_defaults(func=cmd_build)
 
@@ -95,14 +98,17 @@ def main() -> None:
     )
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--rebuild-db", action="store_true")
+    add_decider(p)
     p.set_defaults(func=cmd_route)
 
     p = sub.add_parser(
         "evaluate", help="score the labelled samples (routes them first if needed)"
     )
+    add_decider(p)
     p.set_defaults(func=cmd_evaluate)
 
     p = sub.add_parser("finalize", help="write output.csv from cached decisions")
+    add_decider(p)
     p.set_defaults(func=cmd_finalize)
 
     args = parser.parse_args()

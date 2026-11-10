@@ -45,7 +45,9 @@ class EvidenceTools:
         self._retriever = retriever
         self._store = store
         self._msg = msg
-        self.calls: list[dict[str, str]] = []
+        # Every candidate any lookup returned: routing checks a decider's evidence
+        # pick against this plus the retrieved evidence.
+        self.found: list[EvidenceCandidate] = []
 
     def _rows(self) -> dict:
         return {r["message_id"]: r for r in self._retriever._history(self._msg.user_id)}
@@ -67,7 +69,6 @@ class EvidenceTools:
 
     def search_history(self, query: str) -> tuple[str, list[EvidenceCandidate]]:
         """Semantic search over this user's own history, using the agent's own wording."""
-        self.calls.append({"tool": "search_history", "query": query})
         rows = self._rows()
         if not rows or not query.strip():
             return "No matching messages in this user's history.", []
@@ -78,11 +79,11 @@ class EvidenceTools:
             if score < MIN_VECTOR_SIMILARITY or mid == self._msg.message_id:
                 continue
             found.append(self._to_candidate(rows[mid], score, "vector_semantic", f"matched search: {query[:60]}"))
+        self.found.extend(found)
         return _summarise(found), found
 
     def find_messages_from_sender(self) -> tuple[str, list[EvidenceCandidate]]:
         """Every earlier message this user received from the same sender, with their reactions."""
-        self.calls.append({"tool": "find_messages_from_sender", "query": ""})
         msg = self._msg
         sql = """
             SELECT h.*, e.message_opened, e.message_replied, e.notification_dismissed,
@@ -113,41 +114,5 @@ class EvidenceTools:
             for row in self._store.query(sql, tuple(params))
             if row["message_id"] != msg.message_id
         ]
+        self.found.extend(found)
         return _summarise(found), found
-
-
-TOOL_SPECS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "search_history",
-            "description": (
-                "Search this user's own message history for messages similar to a phrase you choose. "
-                "Use it when the evidence you were given looks unrelated to the incoming message, "
-                "wording your query around the meaning you actually want to match."
-            ),
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Words describing the kind of past message to find.",
-                    }
-                },
-                "required": ["query"],
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "find_messages_from_sender",
-            "description": (
-                "List this user's earlier messages from the same sender, group, or business, "
-                "with how the user reacted. Use it to check for repetition, prior reports, or "
-                "an established relationship."
-            ),
-            "parameters": {"type": "object", "properties": {}},
-        },
-    },
-]

@@ -6,7 +6,6 @@ the two halves silently failed. These tests fail if either alias comes back.
 """
 
 import importlib
-import os
 import pkgutil
 import runpy
 import subprocess
@@ -15,16 +14,14 @@ from pathlib import Path
 
 import pytest
 
+import notification_router
+
 ROOT = Path(__file__).resolve().parent.parent
 
-# agentic.core.config builds its Settings at import and requires a Groq key.
-os.environ.setdefault("GROQ_API_KEY", "test-key-not-used")
-
-import notification_router  # noqa: E402
-
 CORE = [
-    "agent_tools", "config", "context_builder", "data_store", "embeddings", "finalize",
-    "media_analysis", "pipeline", "retrieval", "router", "safety_gate", "schemas",
+    "agent_tools", "config", "context_builder", "data_store", "deciders", "embeddings",
+    "finalize", "media_analysis", "pipeline", "retrieval", "router", "routing",
+    "safety_gate", "schemas", "trace",
 ]  # fmt: skip
 
 
@@ -47,7 +44,7 @@ def test_module_imports(name: str) -> None:
     _assert_no_aliases()
 
 
-@pytest.mark.parametrize("script", ["run_agentic.py", "eval_agentic.py"])
+@pytest.mark.parametrize("script", ["route_one.py", "compare_deciders.py"])
 def test_script_imports(script: str) -> None:
     runpy.run_path(str(ROOT / "scripts" / script), run_name="not_main")
     _assert_no_aliases()

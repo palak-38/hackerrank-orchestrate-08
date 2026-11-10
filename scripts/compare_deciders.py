@@ -1,34 +1,37 @@
-"""A/B comparison of the agentic/ agent variants on a fixed set of labelled messages.
+"""A/B comparison of deciders on a fixed set of labelled messages.
 
-Both variants route the same messages from dataset/sample_messages.csv with the same
-context builder and model settings. Results go to ab_results/<timestamp>/:
-records.jsonl (one line per message per variant) and summary.md.
+Every decider routes the same messages from dataset/sample_messages.csv through the
+same routing module, so results differ only in how the decision is reached. Results
+go to ab_results/<timestamp>/: records.jsonl (one line per message per decider) and
+summary.md.
 
 Usage:
-    python scripts/eval_agentic.py
-    python scripts/eval_agentic.py --ids sample_msg_001,sample_msg_013
+    python scripts/compare_deciders.py
+    python scripts/compare_deciders.py --deciders agent --ids sample_msg_001,sample_msg_013
 """
 
 import argparse
-import asyncio
 import csv
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
 from openai import RateLimitError
 
-from notification_router.agentic.services.agent_routing import route_message
-from notification_router.agentic.services.trace import RoutingTrace
 from notification_router.context_builder import ContextBuilder
 from notification_router.data_store import DataStore, connect
+from notification_router.deciders import DECIDERS, Decider, get_decider
 from notification_router.media_analysis import load_cached
+from notification_router.routing import route
+from notification_router.schemas import IncomingMessage
+from notification_router.trace import Trace
 
 ROOT = Path(__file__).resolve().parent.parent
 
 # Fixed set: 4 notify / 3 digest / 3 mute, spanning group, business and personal
 # chats, text, voice and image, single- and multi-evidence and no-evidence labels.
-# Scam samples are excluded: the safety gate decides them before any agent runs.
+# Scam samples are excluded: the scam check decides them before any decider runs.
 DEFAULT_IDS = [
     "sample_msg_001",
     "sample_msg_004",
@@ -41,10 +44,6 @@ DEFAULT_IDS = [
     "sample_msg_014",
     "sample_msg_045",  # mute
 ]
-
-VARIANTS = {
-    "single_agent": route_message,
-}
 
 CALL_DELAY_S = 2.0
 RATE_LIMIT_WAIT_S = 30.0
@@ -60,7 +59,7 @@ def load_gold() -> dict[str, dict]:
     return {r["message_id"]: r for r in csv.DictReader(path.open(encoding="utf-8"))}
 
 
-def tool_use_bucket(trace: RoutingTrace, gold_evidence: list[str]) -> str:
+def tool_use_bucket(trace: Trace, gold_evidence: list[str]) -> str:
     """Was retrieval needed, and did the agent behave accordingly?
 
     Needed means the labelled evidence was missing from the baseline context.
@@ -75,18 +74,18 @@ def tool_use_bucket(trace: RoutingTrace, gold_evidence: list[str]) -> str:
     return "useful_retrieval" if found else "wasted_retrieval"
 
 
-async def run_one(
-    route, message, store, builder
-) -> tuple[dict | None, RoutingTrace | None, str | None]:
+def run_one(
+    decider: Decider, message: IncomingMessage, builder: ContextBuilder
+) -> tuple[dict | None, Trace | None, str | None]:
     for attempt in range(RATE_LIMIT_RETRIES + 1):
         try:
-            decision, trace = await route(message, store, builder)
+            decision, trace = route(message, builder, decider)
             return decision.model_dump(mode="json"), trace, None
         except RateLimitError:
             if attempt == RATE_LIMIT_RETRIES:
                 return None, None, "RateLimitError: retries exhausted"
-            await asyncio.sleep(RATE_LIMIT_WAIT_S)
-        except Exception as exc:  # recorded as a failure for this variant
+            time.sleep(RATE_LIMIT_WAIT_S)
+        except Exception as exc:  # recorded as a failure for this decider
             return (
                 None,
                 getattr(exc, "routing_trace", None),
@@ -122,7 +121,7 @@ def unsupported_ids(record: dict) -> list[str]:
     return [i for i in _ids(pred["evidence_message_ids"]) if i not in known]
 
 
-def summarise(records: list[dict]) -> str:
+def summarise(records: list[dict], deciders: list[str]) -> str:
     rows = []
     buckets = [
         "justified_skip",
@@ -131,8 +130,8 @@ def summarise(records: list[dict]) -> str:
         "wasted_retrieval",
         "n/a",
     ]
-    for variant in VARIANTS:
-        rs = [r for r in records if r["variant"] == variant]
+    for name in deciders:
+        rs = [r for r in records if r["decider"] == name]
         n = len(rs)
         ok = [r for r in rs if r["decision"] is not None]
         llm = [r for r in ok if r["trace"]["decided_by"] == "llm"]
@@ -151,7 +150,7 @@ def summarise(records: list[dict]) -> str:
         }
         rows.append(
             {
-                "variant": variant,
+                "decider": name,
                 "Routing accuracy (action)": pct(
                     sum(r["score"]["action_ok"] for r in rs), n
                 ),
@@ -177,23 +176,21 @@ def summarise(records: list[dict]) -> str:
             }
         )
 
-    metrics = [k for k in rows[0] if k != "variant"]
+    metrics = [k for k in rows[0] if k != "decider"]
     lines = [
-        "| Metric | " + " | ".join(r["variant"] for r in rows) + " |",
+        "| Metric | " + " | ".join(r["decider"] for r in rows) + " |",
         "|---|" + "---|" * len(rows),
     ]
     lines += [f"| {m} | " + " | ".join(r[m] for r in rows) + " |" for m in metrics]
 
     lines.append("\nPer message (action/type, tool bucket):\n")
-    lines.append("| message_id | gold | " + " | ".join(VARIANTS) + " |")
-    lines.append("|---|---|" + "---|" * len(VARIANTS))
+    lines.append("| message_id | gold | " + " | ".join(deciders) + " |")
+    lines.append("|---|---|" + "---|" * len(deciders))
     for mid in dict.fromkeys(r["message_id"] for r in records):
         cells = []
         gold = None
-        for variant in VARIANTS:
-            r = next(
-                x for x in records if x["message_id"] == mid and x["variant"] == variant
-            )
+        for name in deciders:
+            r = next(x for x in records if x["message_id"] == mid and x["decider"] == name)
             gold = f"{r['gold']['action']}/{r['gold']['message_type']}"
             if r["decision"] is None:
                 cells.append(f"ERROR: {r['error'][:40]}")
@@ -204,13 +201,22 @@ def summarise(records: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def main() -> None:
+def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--ids", help="comma-separated sample message IDs (default: fixed set of 10)"
     )
+    parser.add_argument(
+        "--deciders",
+        default=",".join(DECIDERS),
+        help=f"comma-separated deciders to compare (default: {','.join(DECIDERS)})",
+    )
     args = parser.parse_args()
     ids = args.ids.split(",") if args.ids else DEFAULT_IDS
+    names = args.deciders.split(",")
+    unknown = [n for n in names if n not in DECIDERS]
+    if unknown:
+        raise SystemExit(f"Unknown deciders: {unknown}")
 
     gold = load_gold()
     missing = [i for i in ids if i not in gold]
@@ -219,6 +225,7 @@ async def main() -> None:
 
     store = DataStore(connect())
     builder = ContextBuilder(store, load_cached())
+    deciders = {name: get_decider(name) for name in names}
     messages = {m.message_id: m for m in store.incoming_messages("sample_messages")}
 
     out_dir = ROOT / "ab_results" / datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -227,13 +234,11 @@ async def main() -> None:
 
     with (out_dir / "records.jsonl").open("w", encoding="utf-8") as fh:
         for mid in ids:
-            for variant, route in VARIANTS.items():
-                decision, trace, error = await run_one(
-                    route, messages[mid], store, builder
-                )
+            for name, decider in deciders.items():
+                decision, trace, error = run_one(decider, messages[mid], builder)
                 record = {
                     "message_id": mid,
-                    "variant": variant,
+                    "decider": name,
                     "gold": {
                         k: gold[mid][k]
                         for k in ("action", "message_type", "evidence_message_ids")
@@ -253,14 +258,14 @@ async def main() -> None:
                 fh.write(json.dumps(record) + "\n")
                 fh.flush()
                 status = error or f"{decision['action']}/{decision['message_type']}"
-                print(f"{mid} {variant:13s} {status}", flush=True)
-                await asyncio.sleep(CALL_DELAY_S)
+                print(f"{mid} {name:8s} {status}", flush=True)
+                time.sleep(CALL_DELAY_S)
 
-    summary = summarise(records)
+    summary = summarise(records, names)
     (out_dir / "summary.md").write_text(summary + "\n", encoding="utf-8")
     print("\n" + summary)
     print(f"\nWritten to {out_dir.relative_to(ROOT)}/")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

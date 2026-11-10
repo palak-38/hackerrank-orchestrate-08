@@ -217,6 +217,14 @@ class SafetySignals(BaseModel):
         return ", ".join(flags) if flags else "none"
 
 
+class GateResult(BaseModel):
+    """The scam check's verdict: which tier the message falls in, and why."""
+
+    tier: Literal["certain", "suspicious", "clear"] = "clear"
+    rules: list[str] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+
+
 class RoutingFeatures(BaseModel):
     is_quiet_hours: bool = False
     group_muted_by_user: bool = False
@@ -244,6 +252,7 @@ class MessageRoutingContext(BaseModel):
     sender_display: str = ""
     evidence: HistoricalEvidence = Field(default_factory=HistoricalEvidence)
     features: RoutingFeatures = Field(default_factory=RoutingFeatures)
+    gate: GateResult = Field(default_factory=GateResult)
 
 
 class LLMRoutingDecision(BaseModel):
@@ -262,67 +271,6 @@ class LLMRoutingDecision(BaseModel):
     )
 
 
-class EvidencePlan(BaseModel):
-    """Whether to look for better evidence, asked on its own.
-
-    Kept separate from the decision on purpose: when the model is asked to plan and
-    decide in one response it commits to an answer first and then never judges a
-    lookup necessary, so the loop never fires.
-    """
-
-    evidence_looks_relevant: bool = Field(
-        description="Does the listed history actually relate to what this message is about?"
-    )
-    need_more_evidence: bool = Field(
-        description="Should a different lookup be run before deciding?"
-    )
-    evidence_tool: Literal["none", "search_history", "find_messages_from_sender"] = (
-        Field(
-            default="none",
-            description="Which lookup to run when need_more_evidence is true.",
-        )
-    )
-    search_query: str = Field(
-        default="",
-        description=(
-            "For search_history: words describing the MEANING to match, not this message's own "
-            "sentence. The automatic search already tried the literal text and failed."
-        ),
-        max_length=200,
-    )
-
-
-class AgentRoutingDecision(LLMRoutingDecision):
-    """Retained for the single-call variant; the two-phase loop uses EvidencePlan."""
-
-    need_more_evidence: bool = Field(
-        default=False,
-        description=(
-            "Set true ONLY if the historical evidence provided looks unrelated to this message "
-            "and a different lookup would plausibly find something better. Otherwise decide now."
-        ),
-    )
-    evidence_tool: Literal["none", "search_history", "find_messages_from_sender"] = (
-        Field(
-            default="none",
-            description="Which lookup to run when need_more_evidence is true.",
-        )
-    )
-    search_query: str = Field(
-        default="",
-        description="For search_history: the wording to match past messages against.",
-        max_length=200,
-    )
-
-    def to_decision(self) -> LLMRoutingDecision:
-        return LLMRoutingDecision(
-            action=self.action,
-            message_type=self.message_type,
-            reason=self.reason,
-            confidence=self.confidence,
-        )
-
-
 class RoutingDecision(BaseModel):
     """Final decision written to output.csv."""
 
@@ -338,7 +286,8 @@ class RoutingDecision(BaseModel):
     # which one answered rather than leaving a mixed run silently indistinguishable.
     provider: str = ""
     model: str = ""
-    agent_rounds: int = 0
+    # Which decider produced it; the cache only reuses decisions from the same one.
+    decider: str = "single"
 
     def as_output_row(self) -> dict[str, str]:
         return {

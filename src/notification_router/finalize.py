@@ -16,7 +16,7 @@ from notification_router.schemas import Action, MessageType, RoutingDecision
 COLUMNS = ["message_id", "action", "message_type", "reason", "confidence", "evidence_message_ids"]
 
 
-def _fallback(message_id: str) -> RoutingDecision:
+def _fallback(message_id: str, decider: str) -> RoutingDecision:
     """digest is the safe default: it neither suppresses something urgent nor
     interrupts the user on no information."""
     return RoutingDecision(
@@ -28,11 +28,13 @@ def _fallback(message_id: str) -> RoutingDecision:
         evidence_message_ids="none",
         decided_by="fallback",
         prompt_version=PROMPT_VERSION,
+        decider=decider,
     )
 
 
 def finalize(
     store: DataStore,
+    decider: str = "single",
     table: str = "messages",
     cache_path: Path = ROUTING_CACHE,
     output_path: Path = OUTPUT_CSV,
@@ -40,14 +42,14 @@ def finalize(
     """Writes output.csv with exactly one row per input message. Any message still
     missing from the cache is backfilled with a safe default."""
     messages = store.incoming_messages(table)
-    decisions = load_cache(cache_path)
+    decisions = load_cache(decider, cache_path)
 
     rows = []
     missing = 0
     for msg in messages:
         decision = decisions.get(msg.message_id)
         if decision is None:
-            decision = _fallback(msg.message_id)
+            decision = _fallback(msg.message_id, decider)
             missing += 1
         rows.append(decision.as_output_row())
 

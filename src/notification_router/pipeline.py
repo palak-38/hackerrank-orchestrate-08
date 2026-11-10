@@ -5,19 +5,12 @@ import sys
 import time
 from pathlib import Path
 
-from notification_router.config import (
-    AGENT_ENABLED,
-    CACHE_DIR,
-    CALL_DELAY_SECONDS,
-    GATED_MUTE_CONFIDENCE,
-    MAX_EVIDENCE,
-    PROMPT_VERSION,
-    ROUTING_CACHE,
-)
+from notification_router.config import CACHE_DIR, CALL_DELAY_SECONDS, PROMPT_VERSION, ROUTING_CACHE
 from notification_router.context_builder import ContextBuilder
 from notification_router.data_store import DataStore
-from notification_router.safety_gate import should_hard_mute
-from notification_router.schemas import Action, IncomingMessage, MessageType, RoutingDecision
+from notification_router.deciders import Decider
+from notification_router.routing import route
+from notification_router.schemas import RoutingDecision
 
 
 def _safe(text: str) -> str:
@@ -29,8 +22,9 @@ def _safe(text: str) -> str:
     return str(text).encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
-def load_cache(path: Path = ROUTING_CACHE) -> dict[str, RoutingDecision]:
-    """Decisions made under an older prompt version are ignored, not reused."""
+def load_cache(decider: str, path: Path = ROUTING_CACHE) -> dict[str, RoutingDecision]:
+    """Only decisions from this decider under the current prompt version are reused;
+    anything else is ignored, so switching --decider never replays the other one."""
     if not path.exists():
         return {}
     out: dict[str, RoutingDecision] = {}
@@ -41,6 +35,8 @@ def load_cache(path: Path = ROUTING_CACHE) -> dict[str, RoutingDecision]:
         if record.get("prompt_version") != PROMPT_VERSION:
             continue
         decision = RoutingDecision.model_validate(record)
+        if decision.decider != decider:
+            continue
         out[decision.message_id] = decision
     return out
 
@@ -51,77 +47,10 @@ def append_cache(decision: RoutingDecision, path: Path = ROUTING_CACHE) -> None:
         f.write(json.dumps(decision.model_dump(mode="json"), ensure_ascii=False) + "\n")
 
 
-def _merge_evidence(ctx, extra) -> str:
-    """Seeded fused evidence first, then anything the agent turned up, capped as before.
-
-    The deterministic retrieval stays the floor: the agent can add to the citation
-    list but never displaces a seeded candidate.
-    """
-    seen = {c.message_id for c in ctx.evidence.candidates}
-    merged = list(ctx.evidence.candidates)
-    for cand in sorted(extra, key=lambda c: -c.score):
-        if cand.message_id not in seen and cand.message_id != ctx.message.message_id:
-            merged.append(cand)
-            seen.add(cand.message_id)
-    ids = [c.message_id for c in merged[:MAX_EVIDENCE]]
-    return ";".join(ids) if ids else "none"
-
-
-def decide(msg: IncomingMessage, builder: ContextBuilder, llm_router, tools_factory=None) -> RoutingDecision:
-    ctx = builder.build(msg)
-    evidence_ids = ctx.evidence.as_csv_field()
-
-    gated, gate_reason = should_hard_mute(ctx.features.safety)
-    if gated:
-        # The LLM still classifies, but cannot change the action.
-        try:
-            llm = llm_router.route(ctx)
-            message_type = llm.message_type
-            if message_type not in {MessageType.scam, MessageType.spam}:
-                message_type = MessageType.scam
-        except Exception:  # noqa: BLE001 - safety decision must not depend on the LLM
-            message_type = MessageType.scam
-        return RoutingDecision(
-            message_id=msg.message_id,
-            action=Action.mute,
-            message_type=message_type,
-            reason=gate_reason,
-            confidence=GATED_MUTE_CONFIDENCE,
-            evidence_message_ids=evidence_ids,
-            decided_by="safety_gate",
-            prompt_version=PROMPT_VERSION,
-            provider=llm_router.provider,
-            model=llm_router.model,
-        )
-
-    rounds = 0
-    if AGENT_ENABLED and tools_factory is not None:
-        llm, extra, rounds = llm_router.route_agentic(ctx, tools_factory(msg))
-        if extra:
-            evidence_ids = _merge_evidence(ctx, extra)
-    else:
-        llm = llm_router.route(ctx)
-
-    return RoutingDecision(
-        message_id=msg.message_id,
-        action=llm.action,
-        message_type=llm.message_type,
-        reason=llm.reason,
-        confidence=llm.confidence,
-        evidence_message_ids=evidence_ids,
-        decided_by="llm",
-        prompt_version=PROMPT_VERSION,
-        provider=llm_router.provider,
-        model=llm_router.model,
-        agent_rounds=rounds,
-    )
-
-
 def run(
     store: DataStore,
     builder: ContextBuilder,
-    llm_router,
-    tools_factory=None,
+    decider: Decider,
     table: str = "messages",
     limit: int | None = None,
     cache_path: Path = ROUTING_CACHE,
@@ -132,13 +61,13 @@ def run(
     if limit:
         messages = messages[:limit]
 
-    done = load_cache(cache_path)
+    done = load_cache(decider.name, cache_path)
     pending = [m for m in messages if m.message_id not in done]
     print(f"{len(messages)} messages, {len(done)} already cached, {len(pending)} to process")
 
     for i, msg in enumerate(pending, 1):
         try:
-            decision = decide(msg, builder, llm_router, tools_factory)
+            decision, _ = route(msg, builder, decider)
         except Exception as exc:  # noqa: BLE001 - stop, do not fabricate a decision
             print(_safe(f"\nSTOPPED at {msg.message_id} ({i}/{len(pending)}): {type(exc).__name__}: {exc}"))
             print(f"{len(done)} decisions are safe in {cache_path}. Re-run to resume from here.")

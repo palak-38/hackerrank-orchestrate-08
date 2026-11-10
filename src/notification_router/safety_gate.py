@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 
-from notification_router.schemas import MessageRoutingContext, SafetySignals
+from notification_router.schemas import GateResult, MessageRoutingContext, SafetySignals
 
 # Each pattern must be specific enough that a legitimate sender would not match it.
 # The gate forces `mute`, so false positives suppress real messages — precision over recall.
@@ -101,30 +101,59 @@ def evaluate(ctx: MessageRoutingContext) -> SafetySignals:
     return signals
 
 
-def should_hard_mute(signals: SafetySignals) -> tuple[bool, str]:
-    """The only decision the LLM is not allowed to make. Returns (mute, reason)."""
+# The scam check sorts every rule into one of two tiers. A rule moves between tiers
+# by moving its name between these lists; order sets which reason is reported first.
+#
+# certain: muted outright, and the message never reaches the LLM. prompt_injection
+# must stay here - "asking the LLM to confirm" is exactly what the injection wants.
+CERTAIN_RULES = [
+    "lookalike_domain",
+    "prompt_injection",
+    "otp_solicitation",
+    "card_pin_request",
+    "credential_request_reversed",
+]
+# suspicious: the LLM sees the message with these reasons attached and confirms or
+# rejects the scam call, so a legitimate sender that trips one is not silently lost.
+SUSPICIOUS_RULES = [
+    "credential_alert_with_link",
+    "kyc_credential_request",
+    "pay_to_restore_service",
+    "account_blocked_threat",
+    "prize_claim",
+    "reported_new_domain",
+]
+
+REASONS = {
+    "lookalike_domain": "Unverified sender using a lookalike domain instead of the brand's official domain.",
+    "prompt_injection": "Message tries to instruct the notification router itself, which no legitimate sender does.",
+    "otp_solicitation": "Message asks the user to share or enter a one-time code, a hallmark of credential theft.",
+    "card_pin_request": "Message asks the user to share card, PIN or bank details.",
+    "credential_request_reversed": "Message asks the user to share card, PIN or bank details.",
+    "credential_alert_with_link": "Message claims an account or credential problem and pushes the user to verify through a link.",
+    "kyc_credential_request": "Message requests KYC verification through a link, a common account-takeover scam.",
+    "pay_to_restore_service": "Message pressures an urgent payment through a link to avoid service loss.",
+    "account_blocked_threat": "Message threatens account suspension unless the user verifies through a link.",
+    "prize_claim": "Message claims a prize and asks for a fee or link click.",
+    "reported_new_domain": "Heavily reported sender operating from a newly registered domain.",
+}
+
+
+def _fired(signals: SafetySignals) -> set[str]:
+    fired = set(signals.matched_patterns)
     if signals.domain_mismatch and signals.business_unverified:
-        return True, "Unverified sender using a lookalike domain instead of the brand's official domain."
-
-    if signals.matched_patterns:
-        if "prompt_injection" in signals.matched_patterns:
-            return True, "Message tries to instruct the notification router itself, which no legitimate sender does."
-        if "otp_solicitation" in signals.matched_patterns:
-            return True, "Message asks the user to share or enter a one-time code, a hallmark of credential theft."
-        if "credential_alert_with_link" in signals.matched_patterns:
-            return True, "Message claims an account or credential problem and pushes the user to verify through a link."
-        if "kyc_credential_request" in signals.matched_patterns:
-            return True, "Message requests KYC verification through a link, a common account-takeover scam."
-        if {"card_pin_request", "credential_request_reversed"} & set(signals.matched_patterns):
-            return True, "Message asks the user to share card, PIN or bank details."
-        if "pay_to_restore_service" in signals.matched_patterns:
-            return True, "Message pressures an urgent payment through a link to avoid service loss."
-        if "account_blocked_threat" in signals.matched_patterns:
-            return True, "Message threatens account suspension unless the user verifies through a link."
-        if "prize_claim" in signals.matched_patterns:
-            return True, "Message claims a prize and asks for a fee or link click."
-
+        fired.add("lookalike_domain")
     if signals.high_report_count and signals.sender_domain_is_new:
-        return True, "Heavily reported sender operating from a newly registered domain."
+        fired.add("reported_new_domain")
+    return fired
 
-    return False, ""
+
+def assess(signals: SafetySignals) -> GateResult:
+    """Tier the message: certain (mute, no LLM), suspicious (LLM confirms), or clear."""
+    fired = _fired(signals)
+    for tier, rules in (("certain", CERTAIN_RULES), ("suspicious", SUSPICIOUS_RULES)):
+        hits = [r for r in rules if r in fired]
+        if hits:
+            reasons = list(dict.fromkeys(REASONS[r] for r in hits))
+            return GateResult(tier=tier, rules=hits, reasons=reasons)
+    return GateResult()

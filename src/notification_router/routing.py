@@ -1,0 +1,121 @@
+"""Routes one message: the single place a RoutingDecision is made.
+
+    context -> scam check -> decider -> evidence check -> RoutingDecision
+
+Only the decider varies. The scam check, the evidence rules, and provenance are
+applied here once, so every decider is held to the same contract.
+"""
+
+from __future__ import annotations
+
+import time
+
+from notification_router.agent_tools import EvidenceTools
+from notification_router.config import (
+    GATED_MUTE_CONFIDENCE,
+    MAX_EVIDENCE,
+    PROMPT_VERSION,
+    TRACE_VERBOSE,
+)
+from notification_router.context_builder import ContextBuilder
+from notification_router.deciders import Decider
+from notification_router.schemas import (
+    Action,
+    IncomingMessage,
+    MessageRoutingContext,
+    MessageType,
+    RoutingDecision,
+)
+from notification_router.trace import Trace
+
+
+def _cite(
+    message: IncomingMessage,
+    ctx: MessageRoutingContext,
+    tools: EvidenceTools,
+    picks: list[str] | None,
+    trace: Trace,
+) -> str:
+    """The evidence_message_ids field. A decider's own pick is used only if every ID
+    was actually shown to it; otherwise the retrieved evidence stands."""
+    if picks is None:
+        return ctx.evidence.as_csv_field()
+
+    shown = {c.message_id for c in ctx.evidence.candidates + tools.found}
+    shown.discard(message.message_id)
+    unseen = [mid for mid in picks if mid not in shown]
+
+    problem = None
+    if len(picks) != len(set(picks)):
+        problem = f"duplicate evidence IDs: {picks}"
+    elif len(picks) > MAX_EVIDENCE:
+        problem = f"{len(picks)} evidence IDs, more than {MAX_EVIDENCE}"
+    elif unseen:
+        problem = f"evidence IDs the decider was never shown: {unseen}"
+
+    if problem:
+        trace.evidence_fallback = problem
+        return ctx.evidence.as_csv_field()
+    return ";".join(picks) if picks else "none"
+
+
+def route(
+    message: IncomingMessage, builder: ContextBuilder, decider: Decider
+) -> tuple[RoutingDecision, Trace]:
+    trace = Trace(decider=decider.name, message_id=message.message_id)
+    started = time.perf_counter()
+    try:
+        ctx = builder.build(message)
+        trace.gate_tier = ctx.gate.tier
+        trace.baseline_evidence_ids = ctx.evidence.message_ids()
+
+        if ctx.gate.tier == "certain":
+            # The one decision the LLM never sees: muted on the scam check alone.
+            decision = RoutingDecision(
+                message_id=message.message_id,
+                action=Action.mute,
+                message_type=MessageType.scam,
+                reason=ctx.gate.reasons[0],
+                confidence=GATED_MUTE_CONFIDENCE,
+                evidence_message_ids=ctx.evidence.as_csv_field(),
+                decided_by="safety_gate",
+                prompt_version=PROMPT_VERSION,
+                decider=decider.name,
+            )
+        else:
+            # A suspicious message reaches the decider with the scam check's reasons
+            # in its prompt, and the decider confirms or rejects them.
+            tools = EvidenceTools(builder.retriever, builder.store, message)
+            verdict = decider.decide(ctx, tools, trace)
+            trace.tool_evidence_ids = list(dict.fromkeys(c.message_id for c in tools.found))
+            decision = RoutingDecision(
+                message_id=message.message_id,
+                action=verdict.decision.action,
+                message_type=verdict.decision.message_type,
+                reason=verdict.decision.reason,
+                confidence=verdict.decision.confidence,
+                evidence_message_ids=_cite(message, ctx, tools, verdict.evidence_ids, trace),
+                decided_by="llm",
+                prompt_version=PROMPT_VERSION,
+                provider=verdict.provider,
+                model=verdict.model,
+                decider=decider.name,
+            )
+
+        trace.decided_by = decision.decided_by
+        trace.final_decision = {
+            "action": decision.action.value,
+            "message_type": decision.message_type.value,
+            "confidence": decision.confidence,
+            "evidence_message_ids": decision.evidence_message_ids,
+        }
+        return decision, trace
+
+    except Exception as exc:
+        trace.error = f"{type(exc).__name__}: {exc}"[:300]
+        exc.routing_trace = trace  # lets evaluation inspect failed runs
+        raise
+    finally:
+        trace.latency_s = round(time.perf_counter() - started, 3)
+        if TRACE_VERBOSE:
+            trace.emit()

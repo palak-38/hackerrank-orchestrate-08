@@ -1,8 +1,7 @@
 """Scores routed sample_messages.csv against the labels shipped with the dataset.
 
 Usage:
-    notification-router evaluate          # routes the samples first if needed
-    python -m notification_router.evaluation.score   # or score whatever is already cached
+    notification-router evaluate [--decider agent]   # routes the samples first if needed
 """
 
 from __future__ import annotations
@@ -14,14 +13,14 @@ from notification_router.config import DATASET_DIR
 from notification_router.pipeline import load_cache
 
 
-def main() -> None:
+def main(decider: str = "single") -> None:
     truth = {r["message_id"]: r for r in csv.DictReader((DATASET_DIR / "sample_messages.csv").open(encoding="utf-8"))}
-    predictions = load_cache()
+    predictions = load_cache(decider)
     scored = [(mid, row) for mid, row in truth.items() if mid in predictions]
 
     if not scored:
         print("No cached predictions for sample_messages. Run:")
-        print("  notification-router route --table sample_messages")
+        print(f"  notification-router route --table sample_messages --decider {decider}")
         return
 
     action_hits = 0

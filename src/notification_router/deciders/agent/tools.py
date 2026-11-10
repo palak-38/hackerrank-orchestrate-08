@@ -1,6 +1,6 @@
 from agents import RunContextWrapper, function_tool
 
-from notification_router.agentic.agents.context import NotificationContext  # type: ignore
+from notification_router.deciders.agent.context import NotificationContext
 
 
 @function_tool
@@ -14,10 +14,7 @@ def search_history(
         query: Semantic search query describing the relevant topic.
     """
 
-    summary, candidates = ctx.context.evidence_tools.search_history(query)
-
-    ctx.context.retrieved_evidence.extend(candidates)
-
+    summary, _ = ctx.context.evidence_tools.search_history(query)
     return summary
 
 
@@ -36,8 +33,5 @@ def find_messages_from_sender(
     if scope != "current_sender":
         raise ValueError("Unsupported sender lookup scope")
 
-    summary, candidates = ctx.context.evidence_tools.find_messages_from_sender()
-
-    ctx.context.retrieved_evidence.extend(candidates)
-
+    summary, _ = ctx.context.evidence_tools.find_messages_from_sender()
     return summary

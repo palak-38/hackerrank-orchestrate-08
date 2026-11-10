@@ -6,7 +6,6 @@ import time
 import instructor
 
 from notification_router.config import (
-    AGENT_MAX_ROUNDS,
     GROQ_MODEL,
     GROQ_TEMPERATURE,
     LLM_PROVIDER,
@@ -16,7 +15,6 @@ from notification_router.config import (
     ORCAROUTER_BASE_URL,
     ORCAROUTER_MODEL,
     PAID_PROVIDERS,
-    PROMPT_VERSION,
     PROVIDER_FAILOVER,
     ROUTING_GEMINI_MODEL,
     gemini_api_key,
@@ -24,7 +22,7 @@ from notification_router.config import (
     openrouter_api_key,
     orcarouter_auth_token,
 )
-from notification_router.schemas import EvidencePlan, LLMRoutingDecision, MessageRoutingContext
+from notification_router.schemas import LLMRoutingDecision, MessageRoutingContext
 
 SYSTEM_PROMPT = """You are a WhatsApp notification router. For one incoming message you decide whether to \
 interrupt the user now, save it for later, or suppress it.
@@ -199,23 +197,18 @@ def build_user_prompt(ctx: MessageRoutingContext) -> str:
     )
     lines.append(f"safety flags: {f.safety.summary()}")
 
+    if ctx.gate.tier == "suspicious":
+        lines.append("\n=== SCAM CHECK ===")
+        lines.append("The automatic scam check flagged this message as suspicious:")
+        lines.extend(f"- {reason}" for reason in ctx.gate.reasons)
+        lines.append(
+            "Confirm or reject this. If it is a scam, choose mute with message_type scam. "
+            "If the sender's standing and this user's history show it is legitimate, route it normally."
+        )
+
     lines.append("\nRoute this message.")
     return "\n".join(lines)
 
-
-AGENT_PROMPT = """You decide whether a routing system should look harder for a user's past messages before routing an incoming one. You do not route it yourself here.
-
-The history shown was retrieved by a literal keyword and embedding search. It misses past messages that mean the same thing in different words, and it returns nothing for short or media-only messages.
-
-Set need_more_evidence when either holds:
-- the history section says nothing relevant was found, and this user could plausibly have received something related before;
-- the listed messages do not actually relate to what this message is about.
-
-Choose one lookup. Prefer search_history in almost every case - it is the only one that can find a past message about the same subject.
-- search_history: you supply search_query. Describe the MEANING to match in different words - the topic, the situation, the kind of request. Do not repeat this message's own sentence, that search already failed. For a water tanker notice try "water supply tanker tank cleaning"; for a clinic message try "health clinic appointment"; for someone reselling an item try "selling second hand item pickup".
-- find_messages_from_sender: only when the sender's own track record is what matters - whether they repeat themselves, or whether this user reported them before. It cannot find messages about a topic.
-
-If the shown history clearly relates to this message, set need_more_evidence false."""
 
 RETRY_AFTER = re.compile(r"try again in ([\d.]+)s", re.IGNORECASE)
 
@@ -380,66 +373,3 @@ class LLMRouter:
             {"role": "user", "content": build_user_prompt(ctx)},
         ]
         return self._call(messages, LLMRoutingDecision, max_retries)
-
-    def route_agentic(self, ctx: MessageRoutingContext, tools, max_retries: int = 3):
-        """Plan evidence lookups, run them, then decide.
-
-        Returns (decision, extra_candidates, rounds_used). Planning is a separate call
-        from deciding because a model asked to do both in one response commits to an
-        answer first and then never asks for a lookup.
-        """
-        base_prompt = build_user_prompt(ctx)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": base_prompt},
-        ]
-        extra: list = []
-        asked: set[str] = set()
-
-        for rounds in range(AGENT_MAX_ROUNDS):
-            plan = self._call(
-                [
-                    {"role": "system", "content": AGENT_PROMPT},
-                    *messages[1:],
-                    {
-                        "role": "user",
-                        "content": "Plan the evidence lookup. Do not route the message yet.",
-                    },
-                ],
-                EvidencePlan,
-                max_retries,
-            )
-            if not plan.need_more_evidence or plan.evidence_tool == "none":
-                break
-
-            key = f"{plan.evidence_tool}:{plan.search_query.strip().lower()}"
-            if key in asked:
-                break
-            asked.add(key)
-
-            if plan.evidence_tool == "search_history":
-                summary, found = tools.search_history(plan.search_query)
-            else:
-                summary, found = tools.find_messages_from_sender()
-
-            extra.extend(found)
-            messages.append(
-                {
-                    "role": "user",
-                    "content": f"=== ADDITIONAL EVIDENCE ({plan.evidence_tool}) ===\n{summary}",
-                }
-            )
-            if not found:
-                break
-
-        messages.append(
-            {
-                "role": "user",
-                "content": "Route this message now, using the most relevant evidence you have seen.",
-            }
-        )
-        return self._call(messages, LLMRoutingDecision, max_retries), extra, len(asked)
-
-
-def prompt_version() -> str:
-    return PROMPT_VERSION

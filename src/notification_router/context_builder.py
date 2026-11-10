@@ -85,6 +85,7 @@ class ContextBuilder:
             evidence=evidence,
         )
         ctx.features = self._features(ctx)
+        ctx.gate = safety_gate.assess(ctx.features.safety)
         return ctx
 
     @staticmethod
