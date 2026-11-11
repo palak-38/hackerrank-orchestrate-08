@@ -30,8 +30,7 @@ class Trace:
     baseline_evidence_ids: list[str] = field(default_factory=list)
     tool_evidence_ids: list[str] = field(default_factory=list)
     # Why the decider's own evidence pick was rejected in favour of the retrieved
-    # evidence; None when the pick was used or the decider made none.
-    evidence_fallback: str | None = None
+
     decided_by: str = ""
     final_decision: dict | None = None
     error: str | None = None

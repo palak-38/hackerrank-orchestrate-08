@@ -17,6 +17,9 @@ __pycache__/
 .venv/
 venv/
 *.egg-info/
+/.pytest_cache/
+/.ruff_cache/
+
 
 # Local A/B comparison runs of the app/ agent variants.
 ab_results/

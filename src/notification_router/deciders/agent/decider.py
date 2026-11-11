@@ -9,6 +9,10 @@ from notification_router.deciders import Verdict
 from notification_router.deciders.agent.context import NotificationContext
 from notification_router.deciders.agent.decision_schema import AgentRoutingDecision
 from notification_router.deciders.agent.notification_agent import build_notification_agent
+from notification_router.evidence import (
+    InvalidEvidenceSelection,
+    validate_evidence_selection,
+)
 from notification_router.router import build_user_prompt
 from notification_router.schemas import MessageRoutingContext
 from notification_router.trace import ToolCallRecord, Trace
@@ -24,8 +28,7 @@ PROVIDER = "groq"
 
 def _summarise_errors(exc: ValidationError) -> str:
     return "; ".join(
-        f"{'.'.join(map(str, err['loc'])) or 'output'}: {err['msg']}"
-        for err in exc.errors()[:5]
+        f"{'.'.join(map(str, err['loc'])) or 'output'}: {err['msg']}" for err in exc.errors()[:5]
     )
 
 
@@ -86,20 +89,44 @@ class AgentDecider:
             raw = result.final_output
             raw = "" if raw is None else str(raw)
             try:
+                # 1. Validate JSON structure and field types.
                 decision = AgentRoutingDecision.model_validate_json(raw.strip())
-            except ValidationError as exc:
-                errors = _summarise_errors(exc)
+
+                # 2. Validate the evidence IDs selected by the agent.
+                validate_evidence_selection(
+                    ctx,
+                    tools,
+                    decision.evidence_message_ids,
+                )
+
+            except (ValidationError, InvalidEvidenceSelection) as exc:
+                if isinstance(exc, ValidationError):
+                    errors = _summarise_errors(exc)
+                else:
+                    errors = str(exc)
+
                 trace.validation_errors.append(errors)
+
                 if attempt == MAX_DECISION_ATTEMPTS:
                     raise ValueError(
-                        f"Invalid decision after {MAX_DECISION_ATTEMPTS} attempts: {errors}"
+                        f"Invalid agent decision after {MAX_DECISION_ATTEMPTS} attempts: {errors}"
                     ) from exc
+
+                # Give the agent its previous response and corrective feedback.
                 run_input = result.to_input_list() + [
                     {
                         "role": "user",
-                        "content": f"Your previous decision was invalid: {errors}. Correct the JSON.",
+                        "content": (
+                            f"Your previous decision was invalid: {errors}\n"
+                            "Return a complete corrected JSON object.\n"
+                            "Select only historical evidence IDs that were "
+                            "provided in the context or retrieval tool results.\n"
+                            "Do not invent evidence IDs.\n"
+                            "If no relevant evidence exists, return []."
+                        ),
                     }
                 ]
+
                 continue
 
             return Verdict(
@@ -108,5 +135,3 @@ class AgentDecider:
                 model=AGENT_MODEL,
                 evidence_ids=decision.evidence_message_ids,
             )
-
-        raise RuntimeError("unreachable")

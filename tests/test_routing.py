@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from notification_router.agent_tools import EvidenceTools
 from notification_router.config import PROMPT_VERSION
 from notification_router.deciders import Verdict
+from notification_router.evidence import InvalidEvidenceSelection
 from notification_router.pipeline import append_cache, load_cache
 from notification_router.router import build_user_prompt
 from notification_router.routing import route
@@ -40,12 +43,16 @@ MESSAGE = IncomingMessage(
 )
 
 
-def _ctx(gate: GateResult | None = None, evidence: list[str] = ("hist_1",)) -> MessageRoutingContext:
+def _ctx(
+    gate: GateResult | None = None, evidence: list[str] = ("hist_1",)
+) -> MessageRoutingContext:
     return MessageRoutingContext(
         message=MESSAGE,
         user=UserContext(user_id="user_1"),
         evidence=HistoricalEvidence(
-            candidates=[EvidenceCandidate(message_id=m, source="sql_exact", score=0.9) for m in evidence]
+            candidates=[
+                EvidenceCandidate(message_id=m, source="sql_exact", score=0.9) for m in evidence
+            ]
         ),
         gate=gate or GateResult(),
     )
@@ -86,13 +93,17 @@ class FakeDecider:
         self.calls += 1
         self.prompts.append(build_user_prompt(ctx))
         tools.found.extend(
-            EvidenceCandidate(message_id=m, source="vector_semantic", score=0.6) for m in self.lookup
+            EvidenceCandidate(message_id=m, source="vector_semantic", score=0.6)
+            for m in self.lookup
         )
         decision = LLMRoutingDecision(
             action=self.action, message_type=self.message_type, reason="scripted", confidence=0.8
         )
         return Verdict(
-            decision=decision, provider="fake-provider", model="fake-model", evidence_ids=self.evidence_ids
+            decision=decision,
+            provider="fake-provider",
+            model="fake-model",
+            evidence_ids=self.evidence_ids,
         )
 
 
@@ -104,7 +115,10 @@ def test_assess_tiers():
     assert assess(SafetySignals(matched_patterns=["prize_claim"])).tier == "suspicious"
     assert assess(SafetySignals(matched_patterns=["otp_solicitation"])).tier == "certain"
     assert assess(SafetySignals(domain_mismatch=True, business_unverified=True)).tier == "certain"
-    assert assess(SafetySignals(high_report_count=True, sender_domain_is_new=True)).tier == "suspicious"
+    assert (
+        assess(SafetySignals(high_report_count=True, sender_domain_is_new=True)).tier
+        == "suspicious"
+    )
 
 
 def test_assess_certain_outranks_suspicious():
@@ -123,7 +137,7 @@ def test_certain_tier_mutes_without_calling_the_decider():
     assert (decision.action, decision.message_type) == (Action.mute, MessageType.scam)
     assert decision.decided_by == "safety_gate"
     assert decision.reason == "asks for a code"
-    assert decision.evidence_message_ids == "hist_1"
+    assert decision.evidence_message_ids == "none"
     assert trace.gate_tier == "certain"
 
 
@@ -175,17 +189,61 @@ def test_empty_pick_means_none():
     assert decision.evidence_message_ids == "none"
 
 
-def test_unseen_pick_falls_back_to_retrieved_evidence():
-    decision, trace = route(MESSAGE, StubBuilder(_ctx()), FakeDecider(evidence_ids=["invented_1"]))
-    assert decision.evidence_message_ids == "hist_1"
-    assert "invented_1" in trace.evidence_fallback
+# def test_unseen_pick_falls_back_to_retrieved_evidence():
+#     decision, trace = route(MESSAGE, StubBuilder(_ctx()), FakeDecider(evidence_ids=["invented_1"]))
+#     assert decision.evidence_message_ids == "hist_1"
+#     assert "invented_1" in trace.evidence_fallback
 
 
-def test_citing_the_message_itself_falls_back():
-    decider = FakeDecider(evidence_ids=["msg_1"], lookup=["msg_1"])
-    decision, trace = route(MESSAGE, StubBuilder(_ctx()), decider)
-    assert decision.evidence_message_ids == "hist_1"
-    assert trace.evidence_fallback is not None
+# def test_citing_the_message_itself_falls_back():
+#     decider = FakeDecider(evidence_ids=["msg_1"], lookup=["msg_1"])
+#     decision, trace = route(MESSAGE, StubBuilder(_ctx()), decider)
+#     assert decision.evidence_message_ids == "hist_1"
+#     assert trace.evidence_fallback is not None
+
+
+def test_unseen_evidence_is_rejected():
+    decider = FakeDecider(evidence_ids=["invented_1"])
+
+    with pytest.raises(
+        InvalidEvidenceSelection,
+        match="Unavailable evidence IDs",
+    ):
+        route(MESSAGE, StubBuilder(_ctx()), decider)
+
+
+def test_cannot_cite_current_message():
+    decider = FakeDecider(
+        evidence_ids=["msg_1"],
+        lookup=["msg_1"],
+    )
+
+    with pytest.raises(InvalidEvidenceSelection):
+        route(MESSAGE, StubBuilder(_ctx()), decider)
+
+
+def test_duplicate_evidence_is_rejected():
+    decider = FakeDecider(evidence_ids=["hist_1", "hist_1"])
+
+    with pytest.raises(
+        InvalidEvidenceSelection,
+        match="Duplicate",
+    ):
+        route(MESSAGE, StubBuilder(_ctx()), decider)
+
+
+def test_more_than_three_evidence_ids_are_rejected():
+    decider = FakeDecider(evidence_ids=["hist_1", "hist_2", "hist_3", "hist_4"])
+
+    with pytest.raises(
+        InvalidEvidenceSelection,
+        match="maximum allowed",
+    ):
+        route(
+            MESSAGE,
+            StubBuilder(_ctx(evidence=["hist_1", "hist_2", "hist_3", "hist_4"])),
+            decider,
+        )
 
 
 # --- provenance and cache -----------------------------------------------------
@@ -228,4 +286,3 @@ def test_cache_lines_without_a_decider_count_as_single(tmp_path):
     cache.write_text(json.dumps(legacy) + "\n", encoding="utf-8")
 
     assert set(load_cache("single", cache)) == {"msg_1"}
-

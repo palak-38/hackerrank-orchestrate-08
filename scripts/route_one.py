@@ -43,8 +43,6 @@ def main() -> None:
         f"\n{trace.decider}: gate {trace.gate_tier}, {trace.model_requests} model requests, "
         f"{len(trace.tool_calls)} tool calls, {trace.latency_s}s"
     )
-    if trace.evidence_fallback:
-        print(f"evidence fallback: {trace.evidence_fallback}")
 
 
 if __name__ == "__main__":

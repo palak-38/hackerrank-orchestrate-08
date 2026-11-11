@@ -13,12 +13,12 @@ import time
 from notification_router.agent_tools import EvidenceTools
 from notification_router.config import (
     GATED_MUTE_CONFIDENCE,
-    MAX_EVIDENCE,
     PROMPT_VERSION,
     TRACE_VERBOSE,
 )
 from notification_router.context_builder import ContextBuilder
 from notification_router.deciders import Decider
+from notification_router.evidence import validate_evidence_selection
 from notification_router.schemas import (
     Action,
     IncomingMessage,
@@ -30,32 +30,21 @@ from notification_router.trace import Trace
 
 
 def _cite(
-    message: IncomingMessage,
     ctx: MessageRoutingContext,
     tools: EvidenceTools,
     picks: list[str] | None,
-    trace: Trace,
 ) -> str:
-    """The evidence_message_ids field. A decider's own pick is used only if every ID
-    was actually shown to it; otherwise the retrieved evidence stands."""
+    """Resolve evidence citations for the final routing decision.
+
+    None: the decider did not select evidence; use initial retrieval.
+    []: the decider explicitly selected no evidence.
+    [IDs]: validate and use exactly the selected IDs.
+    """
     if picks is None:
         return ctx.evidence.as_csv_field()
 
-    shown = {c.message_id for c in ctx.evidence.candidates + tools.found}
-    shown.discard(message.message_id)
-    unseen = [mid for mid in picks if mid not in shown]
+    validate_evidence_selection(ctx, tools, picks)
 
-    problem = None
-    if len(picks) != len(set(picks)):
-        problem = f"duplicate evidence IDs: {picks}"
-    elif len(picks) > MAX_EVIDENCE:
-        problem = f"{len(picks)} evidence IDs, more than {MAX_EVIDENCE}"
-    elif unseen:
-        problem = f"evidence IDs the decider was never shown: {unseen}"
-
-    if problem:
-        trace.evidence_fallback = problem
-        return ctx.evidence.as_csv_field()
     return ";".join(picks) if picks else "none"
 
 
@@ -77,7 +66,7 @@ def route(
                 message_type=MessageType.scam,
                 reason=ctx.gate.reasons[0],
                 confidence=GATED_MUTE_CONFIDENCE,
-                evidence_message_ids=ctx.evidence.as_csv_field(),
+                evidence_message_ids="none",
                 decided_by="safety_gate",
                 prompt_version=PROMPT_VERSION,
                 decider=decider.name,
@@ -94,7 +83,7 @@ def route(
                 message_type=verdict.decision.message_type,
                 reason=verdict.decision.reason,
                 confidence=verdict.decision.confidence,
-                evidence_message_ids=_cite(message, ctx, tools, verdict.evidence_ids, trace),
+                evidence_message_ids=_cite(ctx, tools, verdict.evidence_ids),
                 decided_by="llm",
                 prompt_version=PROMPT_VERSION,
                 provider=verdict.provider,
